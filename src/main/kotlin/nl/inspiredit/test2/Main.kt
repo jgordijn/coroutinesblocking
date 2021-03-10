@@ -78,7 +78,7 @@ fun main() = runBlocking {
                 emit(nr++)
             }
         }
-            .flatMapMerge(15) { nr ->
+            .flatMapMerge(20) { nr ->
                 flow {
                     val time = Timer.start()
                     val start = Instant.now()
@@ -98,7 +98,7 @@ fun main() = runBlocking {
                 emit(nr++)
             }
         }
-            .flatMapMerge(15) { nr ->
+            .flatMapMerge(20) { nr ->
                 flow {
                     val time = Timer.start()
                     val start = Instant.now()
