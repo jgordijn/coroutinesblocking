@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.flow
 import nl.inspiredit.prometheus
 import nl.inspiredit.prometheusRegistry
 import nl.inspiredit.success
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.lang.RuntimeException
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -25,17 +28,23 @@ class ConnectionPool(size: Int, meterRegistry: MeterRegistry) {
     }
 
     fun getConnection(retries: Int = 5, timeout: Duration = Duration.ofSeconds(1)): Connection {
-        val start = Instant.now().plus(timeout)
+        val start = Instant.now()
         var elem = connections.poll()
         while (elem == null) {
             Thread.sleep(10)
-            if (start.isAfter(Instant.now())) {
-                if (retries > 0) getConnection(retries - 1, timeout)
+            if (Duration.between(start, Instant.now()) > timeout) {
+                if (retries > 0) {
+                    println("Timout")
+                    elem = getConnection(retries - 1, timeout)
+                }
                 else throw TimeoutException()
-            }
-            elem = connections.poll()
+            } else
+                elem = connections.poll()
         }
-        println("Got connection $elem ${Thread.currentThread().name}")
+        val stringWriter = StringWriter()
+        val pw = PrintWriter(stringWriter)
+        RuntimeException().printStackTrace(pw)
+//        println("Got connection $elem ${Thread.currentThread().name}:\n${stringWriter.buffer.toString()} ")
         return elem
     }
 
@@ -48,29 +57,32 @@ class ConnectionPool(size: Int, meterRegistry: MeterRegistry) {
 
 val poolsize = 35
 
-val database = Executors.newFixedThreadPool(poolsize * 5).asCoroutineDispatcher()
+val database = Executors.newFixedThreadPool(64 ).asCoroutineDispatcher()
 
 fun main() = runBlocking {
     val meterRegistry = prometheusRegistry
     val perf1 = prometheusRegistry.timer("perfo", "flow", "nr1")
     val perf2 = prometheusRegistry.timer("perfo", "flow", "nr2")
+
     val pool = ConnectionPool(poolsize, meterRegistry)
     prometheus()
     suspend fun doSomethingInBlocking(nr: Int) {
         withContext(database) {
             try {
                 val connection = pool.getConnection(5)
-                println("PERFORM $nr-$connection: ${Thread.currentThread().name}")
+//                println("PERFORM $nr-$connection: ${Thread.currentThread().name}")
                 val time = Timer.start()
                 // This will be the blocking DB call
-                Thread.sleep(Random.nextLong(60, 250))
+                Thread.sleep(Random.nextLong(60, 500))
+//                Thread.sleep(Random.nextLong( 75))
                 time.stop(success)
-                println("call release $connection")
+//                println("call release $connection")
                 pool.release(connection)
-                println("call release $connection DONE")
-                println("Pool size: ${pool.size()}")
+//                println("call release $connection DONE")
+//                println("Pool size: ${pool.size()}")
             } catch (e: nl.inspiredit.test2.TimeoutException) {
-//                println("$nr: ${e}")
+                prometheusRegistry.counter("timeout", "name", Thread.currentThread().name).increment()
+                println("$nr: ${e}")
             }
         }
     }
@@ -82,12 +94,12 @@ fun main() = runBlocking {
                 emit(nr++)
             }
         }
-            .flatMapMerge(20) { nr ->
+            .flatMapMerge(poolsize*2) { nr ->
                 flow {
                     val time = Timer.start()
                     val start = Instant.now()
                     doSomethingInBlocking(nr)
-//                println(Duration.between(start, Instant.now()))
+                println(Duration.between(start, Instant.now()))
                     time.stop(perf1)
                     emit(1)
                 }
@@ -108,7 +120,7 @@ var running = AtomicInteger(0)
                 emit(nr++)
             }
         }
-            .flatMapMerge(20) { nr ->
+            .flatMapMerge(poolsize*2) { nr ->
                 flow {
                     running.incrementAndGet()
                     val time = Timer.start()
