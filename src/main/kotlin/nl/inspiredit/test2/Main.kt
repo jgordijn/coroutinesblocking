@@ -2,13 +2,10 @@ package nl.inspiredit.test2
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
-import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import nl.inspiredit.prometheus
 import nl.inspiredit.prometheusRegistry
 import nl.inspiredit.success
@@ -16,6 +13,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
 class TimeoutException : Exception()
@@ -30,7 +28,6 @@ class ConnectionPool(size: Int, meterRegistry: MeterRegistry) {
         val start = Instant.now().plus(timeout)
         var elem = connections.poll()
         while (elem == null) {
-            println("No connection")
             Thread.sleep(10)
             if (start.isAfter(Instant.now())) {
                 if (retries > 0) getConnection(retries - 1, timeout)
@@ -38,17 +35,20 @@ class ConnectionPool(size: Int, meterRegistry: MeterRegistry) {
             }
             elem = connections.poll()
         }
+        println("Got connection $elem ${Thread.currentThread().name}")
         return elem
     }
 
     fun release(connection: Connection) {
         connections.add(connection)
     }
+
+    fun size() = connections.size
 }
 
 val poolsize = 35
 
-val database = Executors.newFixedThreadPool(poolsize).asCoroutineDispatcher()
+val database = Executors.newFixedThreadPool(poolsize * 5).asCoroutineDispatcher()
 
 fun main() = runBlocking {
     val meterRegistry = prometheusRegistry
@@ -60,13 +60,17 @@ fun main() = runBlocking {
         withContext(database) {
             try {
                 val connection = pool.getConnection(5)
+                println("PERFORM $nr-$connection: ${Thread.currentThread().name}")
                 val time = Timer.start()
+                // This will be the blocking DB call
                 Thread.sleep(Random.nextLong(60, 250))
-//                println("$nr-$connection: ${Thread.currentThread().name}")
                 time.stop(success)
+                println("call release $connection")
                 pool.release(connection)
-            } catch (e: Exception) {
-                println("$nr: ${e.javaClass}")
+                println("call release $connection DONE")
+                println("Pool size: ${pool.size()}")
+            } catch (e: nl.inspiredit.test2.TimeoutException) {
+//                println("$nr: ${e}")
             }
         }
     }
@@ -90,7 +94,13 @@ fun main() = runBlocking {
             }
             .collect { }
     }
-
+var running = AtomicInteger(0)
+    launch {
+        while(true) {
+            println("Running: ${running.get()}, pool size: ${pool.size()}")
+            delay(1000)
+        }
+    }
     launch {
         flow<Int> {
             var nr = 0
@@ -100,11 +110,13 @@ fun main() = runBlocking {
         }
             .flatMapMerge(20) { nr ->
                 flow {
+                    running.incrementAndGet()
                     val time = Timer.start()
                     val start = Instant.now()
                     doSomethingInBlocking(nr)
 //                println(Duration.between(start, Instant.now()))
                     time.stop(perf2)
+                    running.decrementAndGet()
                     emit(1)
                 }
             }
